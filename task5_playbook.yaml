@@ -1,0 +1,121 @@
+---
+
+  - name : Task 5 Ansible Playbooks
+    hosts : all
+    become : true
+
+    vars : 
+      latest_wp : wordpress-6.1.1
+      mysql_pass: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          61396132636561616264666430643533313539356263656636386363326264626133633332656165
+          6439393264326666353233393062636231633762626530350a616561316461333330316662643339
+          37306538653239363236363534336565613438626133623633626238363666303031656666313836
+          3066653061633362360a383139393336373562376235396335366363303531383139353236323836
+          6264
+      db_usr : wordpress
+
+    vars_files : variables.yaml
+
+    tasks : 
+      - name : Installing apache,php,mysql modules
+        apt :
+          pkg : "{{ item }}"
+          state : present
+          update_cache : yes
+        loop : "{{ packages }}"
+        notify: 
+          - restart apache
+          - restart mysql
+
+      - name: Creates directory
+        file :
+          path: /srv/www
+          state: directory
+          mode: 0755
+          owner: www-data
+
+      - name : Downloading wordpress
+        ansible.builtin.get_url:
+          url: https://wordpress.org/latest.tar.gz
+          dest: /srv/www/
+
+      - name: Extract archive
+        ansible.builtin.unarchive:
+          src : /srv/www/{{ latest_wp }}.tar.gz
+          remote_src: yes
+          dest: /srv/www/
+          mode: 0755
+          owner : www-data
+          group: www-data
+
+      - name : Copy vhost conf
+        copy :
+          src: wordpress.conf
+          dest: /etc/apache2/sites-available/
+          mode : 0644
+          owner : www-data
+          group: www-data          
+        notify: 
+          - restart apache
+
+      - name : start wordpress services
+        shell : |
+          a2ensite wordpress
+          a2enmod rewrite
+          a2dissite 000-default
+        register: chcek_status
+        notify: restart apache
+        changed_when: "'already running' not in chcek_status.stdout"
+
+      -  name: update root user password
+         command: mysql -u root  --execute="ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{{ mysql_pass }}';"
+         changed_when: no
+         ignore_errors: no
+         register: result
+
+      - name : Creating mysql DB
+        ansible.builtin.mysql_db:
+          name : "{{ db_usr }}"
+          state : present
+          login_user: root
+          login_password: "{{ mysql_pass }}"
+          
+
+      - name : Creating mysql DB  user
+        ansible.builtin.mysql_user:
+          login_host: 'localhost'
+          login_user: 'root'
+          check_implicit_admin : yes
+          login_password: "{{ mysql_pass }}"
+          host : localhost
+          name : "{{ db_usr }}"
+          state: present
+          password: "{{ mysql_pass }}"
+          priv: "{{ db_usr }}.*:SELECT,INSERT,UPDATE,DELETE,CREATE,DROP,ALTER"
+
+      - name : api check
+        ansible.builtin.uri:
+          url: https://api.wordpress.org/secret-key/1.1/salt/
+          method: GET
+          body_format: raw
+          return_content: true
+          status_code: 200
+        register: api_result
+
+      - name : rendering wp-config file
+        ansible.builtin.template:
+          src : templates/wp-config.php.j2
+          dest: /srv/www/wordpress/wp-config.php
+          mode: 0644
+
+    handlers :
+      - name : restart apache
+        service :
+          name : apache2
+          state: restarted
+
+      - name : restart mysql
+        service :
+          name : mysql
+          state : present
